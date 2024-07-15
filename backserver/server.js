@@ -2,6 +2,8 @@ const express = require('express');
 const mysql = require('mysql2');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
+const axios = require('axios');
+const cheerio = require('cheerio');
 
 // Express 앱 생성
 const app = express();
@@ -123,11 +125,103 @@ app.post('/review/write', (req, res) => {
     });
 });
 
+// 알레르기 코드 추출 함수
+const extractAllergyCodes = (text) => {
+    const regex = /\((\d+(?:,\d+)*)\)/;
+    const match = regex.exec(text);
+    return match ? match[1] : null;
+};
+
+// 크롤링 엔드포인트 (GET /menu/crawl)
+app.get('/menu/crawl', async (req, res) => {
+    const { place, date } = req.query;
+    const validPlaces = ['fclt', 'west', 'east1', 'east2', 'emp', 'icc', 'hawam', 'seoul', 'fclt_cafe', 'east2_cafe', 'big_cafe', 'taeul_cafe'];
+
+    if (!validPlaces.includes(place) || !date) {
+        res.status(400).send('Invalid place or date');
+        return;
+    }
+
+    const url = `https://www.kaist.ac.kr/kr/html/campus/053001.html?dvs_cd=${place}&stt_dt=${date}`;
+    try {
+        const { data } = await axios.get(url);
+        const $ = cheerio.load(data);
+
+        const dateHeader = $('#tab_item_1 > h3').text().trim();
+        const breakfast = $('#tab_item_1 > table > tbody > tr > td:nth-child(1)').html().trim();
+        const lunch = $('#tab_item_1 > table > tbody > tr > td:nth-child(2)').html().trim();
+        const dinner = $('#tab_item_1 > table > tbody > tr > td:nth-child(3)').html().trim();
+
+        const menu = {
+            date: dateHeader,
+            meals: {
+                breakfast,
+                lunch,
+                dinner
+            }
+        };
+
+        // MySQL에 데이터 저장
+        const insertMenuData = (mealTime, mealData) => {
+            const lines = mealData.split('<br>').map(line => line.trim()).filter(line => line);
+            const mealPriceLine = lines[0];
+            const mealItems = lines.slice(1).filter(line => !line.includes('</ul>') && !line.includes('<!--'));
+
+            const insertTab5Query = 'INSERT INTO Tab5 (date, place, time, menuprice) VALUES (?, ?, ?, ?)';
+            connection.query(insertTab5Query, [date, place, mealTime, mealPriceLine], (err, result) => {
+                if (err) {
+                    console.error('Error inserting data into Tab5: ', err);
+                } else {
+                    console.log('Inserted data into Tab5');
+                }
+            });
+
+            mealItems.forEach(item => {
+                const allergy = extractAllergyCodes(item);
+                const foodName = item.replace(/\(.*?\)/g, '').trim();
+
+                // Tab2에 데이터 삽입
+                const insertTab2Query = 'INSERT INTO Tab2 (place, date, time, foodName) VALUES (?, ?, ?, ?)';
+                connection.query(insertTab2Query, [place, date, mealTime, foodName], (err, result) => {
+                    if (err) {
+                        console.error('Error inserting data into Tab2: ', err);
+                    } else {
+                        console.log('Inserted data into Tab2');
+                    }
+                });
+
+                // Tab3에 데이터 삽입 (이미 존재하는 경우 중복 삽입 방지)
+                const insertTab3Query = 'INSERT INTO Tab3 (foodName, allergy, foodImage) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE allergy = VALUES(allergy)';
+                connection.query(insertTab3Query, [foodName, allergy, null], (err, result) => {
+                    if (err) {
+                        console.error('Error inserting data into Tab3: ', err);
+                    } else {
+                        console.log('Inserted data into Tab3');
+                    }
+                });
+            });
+        };
+
+        insertMenuData(1, breakfast);
+        insertMenuData(2, lunch);
+        insertMenuData(3, dinner);
+
+        res.status(200).json(menu);
+
+    } catch (error) {
+        console.error('Error fetching data: ', error);
+        res.status(500).send('Error fetching data');
+    }
+});
+
 // 서버 시작
 const port = 3000;
 app.listen(port, () => {
     console.log(`Server is running on port ${port}`);
 });
+
+
+
 
 
 
